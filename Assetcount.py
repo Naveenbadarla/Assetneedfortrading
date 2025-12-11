@@ -443,6 +443,76 @@ with tab_stoch:
         df = pd.DataFrame({"Available Power (kW)": res["samples"]})
         st.bar_chart(df)
 
+# -----------------------------
+# RESULT SUMMARY BLOCK
+# -----------------------------
+st.subheader("📘 Result Summary")
+
+prob = res["prob_meet"] * 100  # or res_day["prob_full_day"]*100 for the day simulation
+mean_power = res["mean"]       # or min_power.mean()
+p5 = res["p05"]
+
+if prob >= 97:
+    color = "green"
+    status = "Excellent reliability 👍"
+    text = f"""
+    Your fleet can **safely** deliver the {P_target:.0f} kW block in **{prob:.1f}%** of intervals.
+
+    This meets typical requirements for:
+    - 🔹 Day-Ahead trading  
+    - 🔹 Intraday block bids  
+    - 🔹 Reserve/flex markets (FCR/FFR pre-qualification levels)
+
+    Your minimum power (5% worst-case = {p5:.1f} kW) is comfortably above target.
+    """
+elif prob >= 90:
+    color = "orange"
+    status = "Reasonably reliable ⚠️"
+    text = f"""
+    Your fleet delivers the target in **{prob:.1f}%** of intervals.
+
+    This is usually acceptable, but:
+    - There is **some risk of shortfall**
+    - Might not meet strict pre-qualification criteria
+    - Consider adding more EVs or increasing availability
+
+    5% worst-case is **{p5:.1f} kW**, which may be below the target.
+    """
+elif prob >= 60:
+    color = "darkorange"
+    status = "Unstable performance 🟧"
+    text = f"""
+    Your fleet only meets the target in **{prob:.1f}%** of intervals.
+
+    You have **medium-to-high shortfall risk**, meaning:
+    - Not suitable for firm products
+    - Likely imbalance penalties if traded
+    - Need more assets or better operational availability
+    """
+else:
+    color = "red"
+    status = "Not trade-ready ❌"
+    text = f"""
+    Your fleet is **not sufficient** to reliably deliver the target.
+
+    - Probability to meet target: **{prob:.1f}%**
+    - 5% worst-case: **{p5:.1f} kW**
+    - Typically requires **much larger fleet** or **higher plug-in rate**
+
+    Right now, the system would fail **most intervals**.
+    """
+
+# Display colored box
+st.markdown(
+    f"""
+    <div style="border-left: 8px solid {color}; padding: 1em; background-color: #1e1e1e;">
+        <h3 style="color:{color};">{status}</h3>
+        <p style="color:white; font-size:1.1em;">{text}</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # ============================================================
 # TAB 3 – Advanced Full-Day Simulation
