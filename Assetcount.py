@@ -15,11 +15,14 @@ st.set_page_config(
 
 st.title("⚡ Flex Aggregator Sizing Tool – EVs & Home Batteries")
 st.markdown("""
-This tool helps you estimate how many **EVs** or **home batteries** you need
-to offer **15-minute tradable flexibility** (e.g., 100 kW) in DE-LU DA/ID markets.
+Estimate how many **EVs** or **home batteries** you need to reliably provide  
+**15-minute tradable flexibility** (e.g., 100 kW) in DE-LU DA/ID markets.
 
-It includes **deterministic sizing**, **Monte-Carlo stochastic sizing**,
-and **customer segmentation**.
+This tool includes:
+- 🔢 Deterministic sizing  
+- 🎲 Monte-Carlo stochastic sizing  
+- 👥 Customer segmentation  
+- EV-appropriate & home-battery-appropriate segment defaults  
 
 ---
 """)
@@ -46,7 +49,6 @@ def simulate_monte_carlo(segments, duration_h, sims, P_target):
     for i in range(sims):
         total_power = 0
         for (N, Pseg, Eseg, p, m) in segments:
-            # Draw available assets
             A = np.random.binomial(int(N), float(p))
 
             # Power-limited
@@ -91,7 +93,7 @@ asset_choice = st.radio(
     horizontal=True
 )
 
-# Presets
+# Presets for asset parameters
 if asset_choice == "EV Fleet (V2G)":
     default_P = 7.0
     default_E = 60.0
@@ -103,7 +105,7 @@ else:
     default_avail = 0.90
     default_soc = 0.70
 
-# Force all to float (fixes StreamlitMixedNumericTypesError)
+# Force all defaults to float to avoid StreamlitMixedNumericTypesError
 default_P = float(default_P)
 default_E = float(default_E)
 default_avail = float(default_avail)
@@ -157,19 +159,27 @@ with tab_det:
 with tab_stoch:
 
     st.header("🎲 Monte-Carlo Stochastic Sizing")
-    st.markdown("Model real-world heterogeneity using multiple customer segments.")
 
     seg_count = st.selectbox("Number of customer segments", [1, 2, 3], index=1)
 
-    predefined = [
-        ("Commuters", 200, 0.20),
-        ("Home Office Users", 100, 0.50),
-        ("Fleet / Depot Vehicles", 50, 0.80)
-    ]
+    # Different segment defaults depending on asset type
+    if asset_choice == "EV Fleet (V2G)":
+        predefined = [
+            ("Commuters", 200.0, 0.20),
+            ("Home Office Users", 100.0, 0.50),
+            ("Fleet / Depot Vehicles", 50.0, 0.80),
+        ]
+    else:  # Home Batteries
+        predefined = [
+            ("Standard Households", 200.0, 0.90),
+            ("PV-heavy Prosumers", 100.0, 0.95),
+            ("Weekend / Low-usage Homes", 50.0, 0.70),
+        ]
 
     segments = []
 
     for i in range(seg_count):
+
         name, N_default, p_default = predefined[i]
 
         st.subheader(f"Segment {i+1} — {name}")
@@ -177,27 +187,34 @@ with tab_stoch:
         colA, colB, colC, colD, colE = st.columns(5)
 
         with colA:
-            N_seg = float(st.number_input(f"{name} — number of assets", value=float(N_default), step=1.0))
+            N_seg = float(st.number_input(f"{name} — number of assets",
+                                          value=float(N_default), step=1.0))
 
         with colB:
-            P_seg = float(st.number_input(f"{name} — power per asset (kW)", value=default_P))
+            P_seg = float(st.number_input(f"{name} — power per asset (kW)",
+                                          value=default_P))
 
         with colC:
-            E_seg = float(st.number_input(f"{name} — energy per asset (kWh)", value=default_E))
+            E_seg = float(st.number_input(f"{name} — energy per asset (kWh)",
+                                          value=default_E))
 
         with colD:
-            avail_seg = float(st.slider(f"{name} — availability probability", 
+            avail_seg = float(st.slider(f"{name} — availability probability",
                                         0.0, 1.0, value=float(p_default)))
+
         with colE:
-            soc_seg = float(st.slider(f"{name} — usable SoC margin", 0.05, 1.0, value=default_soc))
+            soc_seg = float(st.slider(f"{name} — usable SoC margin",
+                                      0.05, 1.0, value=default_soc))
 
         segments.append((N_seg, P_seg, E_seg, avail_seg, soc_seg))
 
-    sims = int(st.number_input("Monte-Carlo samples", min_value=500, max_value=30000, value=5000, step=500))
+    sims = int(st.number_input("Monte-Carlo samples",
+                               min_value=500, max_value=30000,
+                               value=5000, step=500))
 
     if st.button("Run Monte-Carlo Simulation"):
 
-        with st.spinner("Simulating thousands of 15-minute intervals..."):
+        with st.spinner("Simulating thousands of intervals…"):
             results = simulate_monte_carlo(segments, duration_h, sims, P_target)
 
         mean = results["mean"]
@@ -207,7 +224,7 @@ with tab_stoch:
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Mean available power", f"{mean:.1f} kW")
-        c2.metric("5% worst-case power", f"{p5:.1f} kW")
+        c2.metric("5% worst-case (P5)", f"{p5:.1f} kW")
         c3.metric("Probability to meet target", f"{prob:.1f}%")
 
         st.subheader("Distribution of Available Power")
@@ -215,10 +232,7 @@ with tab_stoch:
         st.bar_chart(df)
 
         st.info("""
-        If probability is below **95–99%**, consider:
-        - more assets  
-        - higher availability  
-        - adding home batteries  
-        - incentive tariffs  
+        If probability is below **95–99%**, consider increasing assets,
+        improving availability, or mixing EVs with home batteries.
         """)
 
