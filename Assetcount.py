@@ -22,7 +22,7 @@ Estimate how many **EVs** or **home batteries** you need to reliably provide
 The app has three levels:
 
 1. **Deterministic sizing** – quick analytic formula  
-2. **Stochastic (per-interval) Monte-Carlo** – randomness & segments  
+2. **Stochastic (single-interval) Monte-Carlo** – randomness & segments  
 3. **Advanced full-day simulation** – time-of-day, PV/load, SoC, correlations  
 
 ---
@@ -83,7 +83,6 @@ def upsample_24_to_96(arr24):
 
 
 def ev_pattern_commuters():
-    # higher at night and evening, low while away at work
     hourly = [
         0.9, 0.9, 0.9, 0.9, 0.8, 0.6, 0.4, 0.2,  # 0–7
         0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1,  # 8–15
@@ -93,7 +92,6 @@ def ev_pattern_commuters():
 
 
 def ev_pattern_home_office():
-    # fairly high all day, very high evenings
     hourly = [
         0.9, 0.9, 0.9, 0.9, 0.8, 0.8, 0.8, 0.8,  # 0–7
         0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8,  # 8–15
@@ -103,7 +101,6 @@ def ev_pattern_home_office():
 
 
 def ev_pattern_fleet():
-    # depot fleet: very high at night, medium in the day
     hourly = [
         0.95, 0.95, 0.95, 0.95, 0.95, 0.9, 0.8, 0.7,  # 0–7
         0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6,      # 8–15
@@ -122,38 +119,33 @@ def get_ev_pattern_for_segment(seg_index):
 
 
 def pv_profile_normalized():
-    """
-    Very simple normalized PV profile (per kWp), "summer-ish".
-    Peak ~1.0 around noon.
-    """
+    """Very simple normalized PV profile (per kWp)."""
     hourly = [
-        0.0, 0.0, 0.0, 0.0,   # 0–3
-        0.0, 0.05, 0.15, 0.3, # 4–7
-        0.5, 0.8, 1.0, 0.9,   # 8–11
-        0.8, 0.6, 0.4, 0.2,   # 12–15
-        0.1, 0.02, 0.0, 0.0,  # 16–19
-        0.0, 0.0, 0.0, 0.0,   # 20–23
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.05, 0.15, 0.3,
+        0.5, 0.8, 1.0, 0.9,
+        0.8, 0.6, 0.4, 0.2,
+        0.1, 0.02, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
     ]
     return upsample_24_to_96(hourly)
 
 
 def load_profile_household_normalized():
-    """
-    Rough typical household load shape normalized to 1.0 at peak.
-    """
+    """Rough typical household load shape normalized to 1.0 at peak."""
     hourly = [
-        0.35, 0.3, 0.3, 0.3,    # 0–3
-        0.35, 0.5, 0.7, 0.6,    # 4–7 (morning bump)
-        0.4, 0.35, 0.35, 0.35,  # 8–11 (day low)
-        0.4, 0.45, 0.6, 0.8,    # 12–15
-        0.9, 1.0, 0.9, 0.8,     # 16–19 big evening peak
-        0.7, 0.6, 0.5, 0.4,     # 20–23
+        0.35, 0.3, 0.3, 0.3,
+        0.35, 0.5, 0.7, 0.6,
+        0.4, 0.35, 0.35, 0.35,
+        0.4, 0.45, 0.6, 0.8,
+        0.9, 1.0, 0.9, 0.8,
+        0.7, 0.6, 0.5, 0.4,
     ]
     return upsample_24_to_96(hourly)
 
 
-PV_PROFILE = pv_profile_normalized()  # length 96
-LOAD_PROFILE = load_profile_household_normalized()  # length 96
+PV_PROFILE = pv_profile_normalized()
+LOAD_PROFILE = load_profile_household_normalized()
 
 
 # ============================================================
@@ -163,16 +155,16 @@ def simulate_ev_day(segments, P_target, duration_h, sims):
     """
     Full-day EV simulation with time-of-day availability.
     segments: list of (N, Pseg, Eseg, p_base, m)
-    Returns stats over days: distribution of min power, fraction of shortfall intervals, etc.
     """
     num_steps = int(24 / DT_H)
     min_power_per_day = np.zeros(sims)
     shortfall_frac_per_day = np.zeros(sims)
+    success_intervals_per_day = np.zeros(sims, dtype=int)
 
     for s in range(sims):
         P_t = np.zeros(num_steps)
 
-        # scenario-level "day type" factor: 0.8–1.2
+        # scenario-level factor for "busy vs quiet day"
         day_type_factor = np.random.normal(loc=1.0, scale=0.1)
         day_type_factor = np.clip(day_type_factor, 0.7, 1.3)
 
@@ -180,14 +172,11 @@ def simulate_ev_day(segments, P_target, duration_h, sims):
             if N <= 0:
                 continue
 
-            pattern = get_ev_pattern_for_segment(seg_idx)  # [0,1]
-            # availability prob as function of time: base * pattern * day factor
+            pattern = get_ev_pattern_for_segment(seg_idx)
             p_t = np.clip(p_base * pattern * day_type_factor, 0.0, 1.0)
 
-            # sample number of available EVs for each time
             A_t = np.random.binomial(int(N), p_t)
 
-            # power and energy limits
             P_power_t = A_t * float(Pseg)
             E_total_t = A_t * float(Eseg) * float(m)
             P_energy_t = np.where(duration_h > 0, E_total_t / float(duration_h), 0.0)
@@ -197,28 +186,32 @@ def simulate_ev_day(segments, P_target, duration_h, sims):
 
         min_power_per_day[s] = P_t.min()
         shortfall_frac_per_day[s] = np.mean(P_t < P_target)
+        success_intervals_per_day[s] = np.sum(P_t >= P_target)
 
     return {
         "min_power": min_power_per_day,
         "shortfall_frac": shortfall_frac_per_day,
         "prob_full_day": np.mean(min_power_per_day >= P_target),
         "avg_shortfall_frac": shortfall_frac_per_day.mean(),
+        "success_intervals": success_intervals_per_day,
     }
 
 
 def simulate_home_battery_day(segments, P_target, sims, weather_sigma):
     """
     Full-day home battery simulation with PV + load + SoC dynamics.
-    segments: list of (N, Pseg, Eseg, p_avail, soc_margin, pv_kwp_per_home, daily_load_kwh)
+    segments: list of
+      (N, Pseg, Eseg, p_avail, soc_margin, pv_kwp_per_home, daily_load_kwh)
     """
     num_steps = len(PV_PROFILE)
     min_power_per_day = np.zeros(sims)
     shortfall_frac_per_day = np.zeros(sims)
+    success_intervals_per_day = np.zeros(sims, dtype=int)
 
     for s in range(sims):
         P_t = np.zeros(num_steps)
 
-        # scenario-level weather factor (shared across all homes)
+        # scenario-level PV factor
         weather_factor = np.random.lognormal(mean=0.0, sigma=weather_sigma)
         weather_factor = np.clip(weather_factor, 0.3, 1.5)
 
@@ -228,44 +221,32 @@ def simulate_home_battery_day(segments, P_target, sims, weather_sigma):
 
             cap = float(Eseg)
             Pmax = float(Pseg)
-            soc_min_frac = 1.0 - float(m)  # if m is "tradable margin", keep the rest
+            soc_min_frac = 1.0 - float(m)
             soc_min = soc_min_frac * cap
 
-            # Build absolute PV & load profiles for this segment (kW)
-            # scale normalized profiles
-            # PV peak power ~ pv_kwp
             pv_kw = PV_PROFILE * pv_kwp * weather_factor
-            # scale load profile so integral over day = daily_kwh
             base_load = LOAD_PROFILE
             norm = np.sum(base_load * DT_H)
             load_kw = base_load * (daily_kwh / norm)
 
-            # SoC trajectory for a "typical" home in the segment (no trading)
             soc = np.zeros(num_steps + 1)
-            # start at 50% full as a neutral point
-            soc[0] = 0.5 * cap
+            soc[0] = 0.5 * cap  # start at 50%
 
             for t in range(num_steps):
-                net_kw = pv_kw[t] - load_kw[t]  # positive: surplus
-                delta_e = net_kw * DT_H  # kWh
+                net_kw = pv_kw[t] - load_kw[t]
+                delta_e = net_kw * DT_H
 
                 if delta_e >= 0:
-                    # charge if surplus
                     soc[t + 1] = min(cap, soc[t] + delta_e)
                 else:
-                    # discharge to cover deficit down to soc_min
                     need = -delta_e
                     available = max(soc[t] - soc_min, 0.0)
                     discharge = min(need, available)
                     soc[t + 1] = soc[t] - discharge
-                    # remaining deficit is imported from grid, ignored here
 
-            # available energy margin for trading per home at each time
-            # we assume we only use a fraction m of the headroom above soc_min
             margin_energy_per_home = np.maximum(soc[1:] - soc_min, 0.0) * m
             P_energy_per_home = margin_energy_per_home / DT_H
 
-            # randomly available homes (technical/contractual availability)
             A_t = np.random.binomial(int(N), float(p_avail), size=num_steps)
 
             P_power_t = A_t * Pmax
@@ -276,12 +257,14 @@ def simulate_home_battery_day(segments, P_target, sims, weather_sigma):
 
         min_power_per_day[s] = P_t.min()
         shortfall_frac_per_day[s] = np.mean(P_t < P_target)
+        success_intervals_per_day[s] = np.sum(P_t >= P_target)
 
     return {
         "min_power": min_power_per_day,
         "shortfall_frac": shortfall_frac_per_day,
         "prob_full_day": np.mean(min_power_per_day >= P_target),
         "avg_shortfall_frac": shortfall_frac_per_day.mean(),
+        "success_intervals": success_intervals_per_day,
     }
 
 
@@ -422,7 +405,9 @@ with tab_stoch:
         segments.append((N_seg, P_seg, E_seg, avail_seg, soc_seg))
 
     sims_interval = int(
-        st.number_input("Monte-Carlo samples (interval)", min_value=500, max_value=30000, value=5000, step=500)
+        st.number_input(
+            "Monte-Carlo samples (interval)", min_value=500, max_value=30000, value=5000, step=500
+        )
     )
 
     if st.button("Run Single-Interval Monte-Carlo"):
@@ -443,75 +428,29 @@ with tab_stoch:
         df = pd.DataFrame({"Available Power (kW)": res["samples"]})
         st.bar_chart(df)
 
-        # -----------------------------
-        # RESULT SUMMARY BLOCK
-        # -----------------------------
-        st.subheader("📘 Result Summary")
-        
-        prob = res["prob_meet"] * 100  # or res_day["prob_full_day"]*100 for the day simulation
-        mean_power = res["mean"]       # or min_power.mean()
-        p5 = res["p05"]
-        
+        # Simple summary for single-interval case
+        st.subheader("📘 Result Summary (Single Interval)")
         if prob >= 97:
-            color = "green"
-            status = "Excellent reliability 👍"
-            text = f"""
-            Your fleet can **safely** deliver the {P_target:.0f} kW block in **{prob:.1f}%** of intervals.
-        
-            This meets typical requirements for:
-            - 🔹 Day-Ahead trading  
-            - 🔹 Intraday block bids  
-            - 🔹 Reserve/flex markets (FCR/FFR pre-qualification levels)
-        
-            Your minimum power (5% worst-case = {p5:.1f} kW) is comfortably above target.
-            """
+            summary = (
+                f"Your fleet can safely deliver the {P_target:.0f} kW block "
+                f"in **{prob:.1f}%** of intervals. This is excellent reliability."
+            )
         elif prob >= 90:
-            color = "orange"
-            status = "Reasonably reliable ⚠️"
-            text = f"""
-            Your fleet delivers the target in **{prob:.1f}%** of intervals.
-        
-            This is usually acceptable, but:
-            - There is **some risk of shortfall**
-            - Might not meet strict pre-qualification criteria
-            - Consider adding more EVs or increasing availability
-        
-            5% worst-case is **{p5:.1f} kW**, which may be below the target.
-            """
+            summary = (
+                f"Your fleet delivers the target in **{prob:.1f}%** of intervals. "
+                "Usually okay, but some shortfall risk remains."
+            )
         elif prob >= 60:
-            color = "darkorange"
-            status = "Unstable performance 🟧"
-            text = f"""
-            Your fleet only meets the target in **{prob:.1f}%** of intervals.
-        
-            You have **medium-to-high shortfall risk**, meaning:
-            - Not suitable for firm products
-            - Likely imbalance penalties if traded
-            - Need more assets or better operational availability
-            """
+            summary = (
+                f"Your fleet only meets the target in **{prob:.1f}%** of intervals. "
+                "This is unstable and not suitable for firm products."
+            )
         else:
-            color = "red"
-            status = "Not trade-ready ❌"
-            text = f"""
-            Your fleet is **not sufficient** to reliably deliver the target.
-        
-            - Probability to meet target: **{prob:.1f}%**
-            - 5% worst-case: **{p5:.1f} kW**
-            - Typically requires **much larger fleet** or **higher plug-in rate**
-        
-            Right now, the system would fail **most intervals**.
-            """
-        
-        # Display colored box
-        st.markdown(
-            f"""
-            <div style="border-left: 8px solid {color}; padding: 1em; background-color: #1e1e1e;">
-                <h3 style="color:{color};">{status}</h3>
-                <p style="color:white; font-size:1.1em;">{text}</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+            summary = (
+                f"Reliability is only **{prob:.1f}%**. "
+                "The fleet is far too small or availability too low for firm trading."
+            )
+        st.write(summary)
 
 
 # ============================================================
@@ -558,15 +497,28 @@ This simulates an entire **24-hour day (96 × 15-min steps)** with:
             ca, cb, cc, cd, ce = st.columns(5)
             with ca:
                 N_seg = float(
-                    st.number_input(f"{name} — number of EVs", value=float(N_default), step=1.0, key=f"adv_N_ev_{i}")
+                    st.number_input(
+                        f"{name} — number of EVs",
+                        value=float(N_default),
+                        step=1.0,
+                        key=f"adv_N_ev_{i}",
+                    )
                 )
             with cb:
                 P_seg = float(
-                    st.number_input(f"{name} — power per EV (kW)", value=default_P, key=f"adv_P_ev_{i}")
+                    st.number_input(
+                        f"{name} — power per EV (kW)",
+                        value=default_P,
+                        key=f"adv_P_ev_{i}",
+                    )
                 )
             with cc:
                 E_seg = float(
-                    st.number_input(f"{name} — battery per EV (kWh)", value=default_E, key=f"adv_E_ev_{i}")
+                    st.number_input(
+                        f"{name} — battery per EV (kWh)",
+                        value=default_E,
+                        key=f"adv_E_ev_{i}",
+                    )
                 )
             with cd:
                 avail_seg = float(
@@ -596,7 +548,10 @@ This simulates an entire **24-hour day (96 × 15-min steps)** with:
             with ca:
                 N_seg = float(
                     st.number_input(
-                        f"{name} — number of homes", value=float(N_default), step=1.0, key=f"adv_N_hb_{i}"
+                        f"{name} — number of homes",
+                        value=float(N_default),
+                        step=1.0,
+                        key=f"adv_N_hb_{i}",
                     )
                 )
             with cb:
@@ -691,6 +646,18 @@ This simulates an entire **24-hour day (96 × 15-min steps)** with:
         prob_full = res_day["prob_full_day"] * 100
         avg_shortfall_frac = res_day["avg_shortfall_frac"] * 100
         min_power = res_day["min_power"]
+        success_counts = res_day["success_intervals"]
+
+        # tradable intervals stats
+        avg_success = success_counts.mean()
+        median_success = np.median(success_counts)
+        p10_success = np.percentile(success_counts, 10)
+        p90_success = np.percentile(success_counts, 90)
+
+        avg_hours = avg_success * DT_H
+        median_hours = median_success * DT_H
+        p10_hours = p10_success * DT_H
+        p90_hours = p90_success * DT_H
 
         c1, c2 = st.columns(2)
         c1.metric("Probability to hold target ALL DAY", f"{prob_full:.1f}%")
@@ -700,8 +667,74 @@ This simulates an entire **24-hour day (96 × 15-min steps)** with:
         df_min = pd.DataFrame({"Minimum daily power (kW)": min_power})
         st.bar_chart(df_min)
 
+        st.subheader("📊 Tradable intervals per day (at target power)")
+        c3, c4, c5 = st.columns(3)
+        c3.metric(
+            "Average successful intervals",
+            f"{avg_success:.1f} of 96",
+            help="Intervals where available power ≥ target.",
+        )
+        c4.metric(
+            "Median successful intervals",
+            f"{median_success:.0f} of 96",
+        )
+        c5.metric(
+            "Range (10–90% of days)",
+            f"{p10_success:.0f} – {p90_success:.0f} intervals",
+        )
+        st.write(
+            f"On a **typical day**, you can trade at least the target power in "
+            f"about **{avg_success:.1f} intervals**, which is roughly "
+            f"**{avg_hours:.1f} hours per day**.\n\n"
+            f"In half of all days (median), you get about **{median_success:.0f} intervals** "
+            f"({median_hours:.1f} hours)."
+        )
+
+        st.subheader("📘 Detailed Result Summary (Full Day)")
+        summary_lines = []
+
+        if prob_full < 5:
+            summary_lines.append(
+                f"- The fleet almost **never** supports a firm 24-hour product "
+                f"(only **{prob_full:.1f}%** of days can hold the target all day)."
+            )
+        elif prob_full < 50:
+            summary_lines.append(
+                f"- The fleet sometimes supports a full-day product "
+                f"(**{prob_full:.1f}%** of days), but reliability is too low for firm trading."
+            )
+        else:
+            summary_lines.append(
+                f"- The fleet can hold the target all day on **{prob_full:.1f}%** of days. "
+                "This may be acceptable for some products."
+            )
+
+        summary_lines.append(
+            f"- On average you have **{avg_shortfall_frac:.1f}%** of intervals with a shortfall. "
+            "Those intervals would cause imbalance if you committed to firm delivery."
+        )
+
+        summary_lines.append(
+            f"- You can typically place trades in about **{avg_hours:.1f} hours per day** "
+            f"at the full target power. On bad days (10th percentile) this drops to "
+            f"**{p10_hours:.1f} hours**, and on good days (90th percentile) it rises "
+            f"to **{p90_hours:.1f} hours**."
+        )
+
+        if avg_success < 40:
+            summary_lines.append(
+                "- This looks more like a **daytime or peak-hour** flexibility portfolio, "
+                "not a 24/7 firm capacity product."
+            )
+        else:
+            summary_lines.append(
+                "- The number of successful intervals is quite high; with some tuning, "
+                "this fleet might support longer or more continuous products."
+            )
+
+        st.write("\n".join(summary_lines))
+
         st.info(
-            "If you want **very reliable products (e.g. 99% probability)**, "
-            "you can increase fleet size, improve availability, "
-            "or combine EVs with home batteries in separate runs."
+            "If you want very reliable products (e.g. 99% probability), you can increase fleet size, "
+            "improve availability, increase battery size, or combine EVs with home batteries."
         )
